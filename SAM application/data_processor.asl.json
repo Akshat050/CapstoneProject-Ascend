@@ -1,0 +1,31 @@
+{
+  "Comment": "Data processor for cleaning and translating data",
+  "StartAt": "Remove Test users",
+  "States": {
+    "Remove Test users": {
+      "Type": "Task",
+      "Resource": "${RemoveTestUserFunction}",
+      "Next": "Translate French Columns"
+    },
+    "Translate French Columns": {
+      "Type": "Task",
+      "Resource": "${TranslateFrenchColumnFunction}",
+      "Next": "Translate French Rows"
+    },
+    "Translate French Rows": {
+      "Type": "Task",
+      "Resource": "${TranslateFrenchRowsFunction}",
+      "Next": "Clean up data"
+    },
+    "Clean up data": {
+      "Type": "Task",
+      "Resource": "${CleanUpDataFunction}",
+      "Next": "Put cleaned data in DB"
+    },
+    "Put cleaned data in DB": {
+      "Type": "Task",
+      "Resource": "${DBFunction}",
+      "End": true
+    }
+  }
+}

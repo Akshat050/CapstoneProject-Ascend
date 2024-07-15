@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  data-processor
+  SAM Template for data-processor app
+
+Parameters:
+  MysqlUser:
+    Type: String
+    Default: ascend
+  MysqlPassword:
+    Type: String
+  MysqlDbName:
+    Type: String
+    Default: ascend_data
+  MysqlPort:
+    Type: String
+    Default: 3306
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    CodeUri: data_processor/
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        DATA_BUCKET: !Ref DataBucket
+
+Resources:
+  InputBucket:
+    Type: AWS::S3::Bucket
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+
+  DataBase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      AutoMinorVersionUpgrade: true
+      DBInstanceClass: db.t3.micro
+      DBName: !Ref MysqlDbName
+      Engine: mysql
+      # EngineVersion: 8.0.36
+      Port: !Ref MysqlPort
+      MasterUsername: !Ref MysqlUser
+      MasterUserPassword: !Ref MysqlPassword
+      MaxAllocatedStorage: 30
+      MultiAZ: false
+      PubliclyAccessible: false
+      VPCSecurityGroups:
+        - sg-03bbbc0242f0af41b
+
+  CustomPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Custom policy for lambda permission
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: "*"
+          - Effect: Allow
+            # TODO resctrict this to only Databucket
+            Action:
+              - s3:*
+            Resource: "*"
+  DataProcessorStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CustomPolicy
+
+  CommonLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - !Ref CustomPolicy
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for lambda
+      GroupName: lambda-sg
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          Description: Ingress rule
+          FromPort: 0
+          IpProtocol: tcp
+          ToPort: 65535
+
+  CSVRecieverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.csv_reciever
+      Role: !GetAtt CommonLambdaRole.Arn
+      Environment:
+        Variables:
+          ANSI_ENCODING: "cp1252"
+          DATA_PROCESSOR_STEP_FN: !Ref DataProcessorStepFunction
+      Events:
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref InputBucket
+            Events: s3:ObjectCreated:*
+
+  RemoveTestUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.remove_test_users
+      Role: !GetAtt CommonLambdaRole.Arn
+
+  TranslateFrenchColumnFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.translate_french_data_columns
+      Role: !GetAtt CommonLambdaRole.Arn
+
+  TranslateFrenchRowsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.translate_french_data_rows
+      Role: !GetAtt CommonLambdaRole.Arn
+
+  CleanUpDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.cleanup_data
+      Role: !GetAtt CommonLambdaRole.Arn
+
+  DBFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.put_data_in_db
+      Role: !GetAtt CommonLambdaRole.Arn
+      VpcConfig:
+        SubnetIds:
+          - subnet-0271721e19f992a83
+          - subnet-07cb4dac923b0446c
+          - subnet-06fb63b873e32d9f4
+          - subnet-030eb8f98d0a41d6a
+        SecurityGroupIds:
+          - !GetAtt LambdaSecurityGroup.GroupId
+      Environment:
+        Variables:
+          MYSQL_USER: !Ref MysqlUser
+          MYSQL_PASSWORD: !Ref MysqlPassword
+          MYSQL_ENDPOINT: !GetAtt DataBase.Endpoint.Address
+          MYSQL_PORT: !Ref MysqlPort
+          DB_NAME: !Ref MysqlDBName
+
+  DataProcessorStepFunction:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Role: !GetAtt DataProcessorStepFunctionRole.Arn
+      DefinitionUri: data_processor.asl.json
+      DefinitionSubstitutions:
+        RemoveTestUserFunction: !GetAtt RemoveTestUserFunction.Arn
+        TranslateFrenchColumnFunction: !GetAtt TranslateFrenchColumnFunction.Arn
+        TranslateFrenchRowsFunction: !GetAtt TranslateFrenchRowsFunction.Arn
+        CleanUpDataFunction: !GetAtt CleanUpDataFunction.Arn
+        DBFunction: !GetAtt DBFunction.Arn
